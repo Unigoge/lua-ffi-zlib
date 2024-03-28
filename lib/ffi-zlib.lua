@@ -6,7 +6,7 @@ local ffi_copy = ffi.copy
 local tonumber = tonumber
 
 local _M = {
-    _VERSION = '0.3.0',
+    _VERSION = '0.6.0',
 }
 
 local mt = { __index = _M }
@@ -95,7 +95,17 @@ unsigned long crc32_combine(unsigned long, unsigned long, long);
 
 ]])
 
-local zlib = ffi.load(ffi.os == "Windows" and "zlib1" or "z")
+local zlib
+if ffi.os == "Windows" then
+    zlib = ffi.load("zlib1")
+elseif ffi.os == "OSX" then
+    zlib = ffi.load("z")
+elseif ffi.os == "Linux" then
+    zlib = ffi.load("libz.so.1")
+else
+    error("lua-ffi-zlib doesn't support platform: " .. ffi.os)
+end
+
 _M.zlib = zlib
 
 -- Default to 16k output buffer
@@ -159,7 +169,10 @@ local function flushOutput(stream, bufsize, output, outbuf)
         return
     end
     -- Read bytes from output buffer and pass to output function
-    output(ffi_str(outbuf, out_sz))
+    local ok, err = output(ffi_str(outbuf, out_sz))
+    if not ok then
+        return err
+    end
 end
 
 local function inflate(input, output, bufsize, stream, inbuf, outbuf)
@@ -201,7 +214,11 @@ local function inflate(input, output, bufsize, stream, inbuf, outbuf)
                return false, "INFLATE: "..zlib_err(err), stream
             end
             -- Write the data out
-            flushOutput(stream, bufsize, output, outbuf)
+            local err = flushOutput(stream, bufsize, output, outbuf)
+            if err then
+               zlib_flateEnd(stream)
+               return false, "INFLATE: "..err
+            end
         until stream.avail_out ~= 0
 
     until err == Z_STREAM_END
@@ -240,13 +257,17 @@ local function deflate(input, output, bufsize, stream, inbuf, outbuf)
             err = zlib_flate(stream, mode)
 
             -- Only possible *bad* return value here
-            if err == Z_STREAM_ERR then
+            if err == Z_STREAM_ERROR then
                -- Error, clean up and return
                zlib_flateEnd(stream)
                return false, "DEFLATE: "..zlib_err(err), stream
             end
             -- Write the data out
-            flushOutput(stream, bufsize, output, outbuf)
+            local err = flushOutput(stream, bufsize, output, outbuf)
+            if err then
+               zlib_flateEnd(stream)
+               return false, "DEFLATE: "..err
+            end
         until stream.avail_out ~= 0
 
         -- In deflate mode all input must be used by this point
